@@ -1,61 +1,109 @@
-import express from 'express';
-import cors from 'cors';
-import fetch from 'node-fetch';
+const express = require('express');
+const axios = require('axios');
+const cors = require('cors');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 
-// ✅ Hardcoded Bigship token (for testing only)
-const TOKEN = 'da93cfe1f14e5be6d00ed24de75bfaa7e0d388e9d7758696c5c7996c0fd0f55d';
-
-// ✅ Enable CORS for all domains
+// Enable CORS for all origins
 app.use(cors());
 app.use(express.json());
 
-// ✅ Health check
-app.get('/', (req, res) => {
-  res.send('✅ Bigship API is working');
-});
+// Bigship API URLs
+const loginUrl = 'https://api.bigship.in/api/login/user';
+const trackingUrl = 'https://api.bigship.in/api/tracking';
 
-// ✅ Tracking endpoint
+// Production Credentials (You should move these to environment variables later)
+const credentials = {
+  user_name: '8318023338',
+  password: 'Kajala@2919',
+  access_key: 'da93cfe1f14e5be6d00ed24de75bfaa7e0d388e9d7758696c5c7996c0fd0f55d'
+};
+
+// Format Bigship date into readable string
+function formatDate(dateStr) {
+  const [day, month, yearAndTime] = dateStr.split('-');
+  const [year, time] = yearAndTime.split(' ');
+  const date = new Date(`${year}-${month}-${day}T${time}`);
+  return date.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+// Production route: /api/track?tracking_id=12345
 app.get('/api/track', async (req, res) => {
-  const { tracking_type, tracking_id } = req.query;
-
-  if (!tracking_type || !tracking_id) {
-    return res.status(400).json({ error: 'Missing query: ?tracking_type=awb|lrn&tracking_id=...' });
+  const trackingId = req.query.tracking_id;
+  if (!trackingId) {
+    return res.status(400).json({ error: 'Missing tracking_id query param' });
   }
-
-  const apiUrl = `https://api.bigship.in/api/tracking?tracking_type=${tracking_type}&tracking_id=${tracking_id}`;
 
   try {
-    const response = await fetch(apiUrl, {
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${TOKEN}`,
-      },
+    // Step 1: Login to Bigship
+    const loginResp = await axios.post(loginUrl, credentials, {
+      headers: { 'Content-Type': 'application/json' }
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      // Use the actual response status if valid, else fallback to 500
-      const statusCode = response.status >= 100 && response.status < 600 ? response.status : 500;
-      return res.status(statusCode).json({ error: data });
+    const token = loginResp.data?.data?.token;
+    if (!token) {
+      return res.status(401).json({ error: 'Failed to get token from Bigship' });
     }
 
-    res.status(200).json(data);
+    // Step 2: Fetch tracking data
+    const trackResp = await axios.get(trackingUrl, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      params: {
+        tracking_type: 'awb',
+        tracking_id: trackingId
+      }
+    });
 
-  } catch (err) {
-    res.status(500).json({ error: err.message || 'Internal Server Error' });
+    const order = trackResp.data?.data?.order_detail;
+    const scans = trackResp.data?.data?.scan_histories || [];
+
+    if (!order) {
+      return res.status(404).json({ error: 'No order found for this AWB' });
+    }
+
+    // Define known Bigship statuses for frontend progress
+    const stages = ['Order Placed', 'In-Transit', 'Out for Delivery', 'Delivered'];
+    const scanStatuses = scans.map(scan => scan.scan_status);
+
+    const progress = stages.map(stage => ({
+      status: stage,
+      reached: stage === 'Order Placed' || scanStatuses.includes(stage)
+    }));
+
+    // Final API response
+    return res.json({
+      courier: order.courier_name,
+      tracking_id: order.tracking_id,
+      order_id: order.invoice_id,
+      last_update: `${order.current_tracking_status} on ${formatDate(order.current_tracking_datetime)}`,
+      order_date: formatDate(order.order_manifest_datetime),
+      progress,
+      scan_history: scans
+    });
+
+  } catch (error) {
+    console.error('❌ Server error:', error?.response?.data || error.message);
+    return res.status(500).json({
+      error: 'Failed to fetch tracking data',
+      details: error?.response?.data || error.message
+    });
   }
 });
 
-// ✅ Fallback 404
-app.use((req, res) => {
-  res.status(404).json({ error: 'Not Found' });
-});
+// Fallback 404 handler
+app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
-// ✅ Start server
+// Start the server
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
+  console.log(`🚀 Bigship Tracker API running on port ${PORT}`);
 });
